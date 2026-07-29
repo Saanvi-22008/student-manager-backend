@@ -1,16 +1,20 @@
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import csv
+import os
+from dotenv import load_dotenv
 
-DB_PATH = "students.db"
+load_dotenv()
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def init_db():
     conn = get_connection()
-    conn.execute("""
+    cur = conn.cursor()
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS students (
             rollno  INTEGER PRIMARY KEY,
             name    TEXT NOT NULL,
@@ -19,50 +23,59 @@ def init_db():
         )
     """)
     conn.commit()
+    cur.close()
     conn.close()
     print("Database ready!")
 
 def seed_db():
     conn = get_connection()
+    cur = conn.cursor()
 
-    # Check if data already exists — if yes, skip
-    existing = conn.execute("SELECT COUNT(*) FROM students").fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM students")
+    existing = cur.fetchone()[0]
     if existing > 0:
         print("Data already exists, skipping seed.")
+        cur.close()
         conn.close()
         return
 
-    # Read the CSV and insert each row
     with open("students.csv") as file:
-        reader = csv.DictReader(file)  # reads each row as a dict like {"name": "Saanvi", "grade": "10", "marks": "92"}
+        reader = csv.DictReader(file)
         for row in reader:
-            conn.execute(
-                "INSERT INTO students (rollno, name, grade, marks) VALUES (?, ?, ?, ?)",
+            cur.execute(
+                "INSERT INTO students (rollno, name, grade, marks) VALUES (%s, %s, %s, %s)",
                 (row["rollno"], row["name"], row["grade"], int(row["marks"]))
             )
 
     conn.commit()
+    cur.close()
     conn.close()
     print("Database seeded!")
 
 def add_face_column():
     conn = get_connection()
+    cur = conn.cursor()
     try:
-        conn.execute("ALTER TABLE students ADD COLUMN face_encoding TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN face_encoding TEXT")
         conn.commit()
         print("Column added!")
-    except sqlite3.OperationalError:
+    except psycopg2.errors.DuplicateColumn:
+        conn.rollback()
         print("Column already exists, skipping.")
+    cur.close()
     conn.close()
 
 def add_photo_path_column():
     conn = get_connection()
+    cur = conn.cursor()
     try:
-        conn.execute("ALTER TABLE students ADD COLUMN photo_path TEXT")
+        cur.execute("ALTER TABLE students ADD COLUMN photo_path TEXT")
         conn.commit()
         print("photo_path column added!")
-    except sqlite3.OperationalError:
+    except psycopg2.errors.DuplicateColumn:
+        conn.rollback()
         print("photo_path column already exists, skipping.")
+    cur.close()
     conn.close()
 
 if __name__ == "__main__":

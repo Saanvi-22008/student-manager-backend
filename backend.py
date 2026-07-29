@@ -6,8 +6,17 @@ from flask import send_from_directory
 import json
 import face_recognition
 import os
+import psycopg2
 from dotenv import load_dotenv
 load_dotenv()
+
+#communicating with supabase
+try:
+    conn = psycopg2.connect("postgresql://postgres.odhdzxlziobukaafpznn:databsepostgres@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres")
+    print("Connected successfully!")
+    conn.close()
+except Exception as e:
+    print("Connection failed:", e)
 
 PHOTO_FOLDER= "photos"
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
