@@ -2,31 +2,18 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from database import get_connection, init_db, seed_db
 from groq import Groq
-from flask import send_from_directory
+import io
 import json
 import face_recognition
 import os
-import psycopg2
 from dotenv import load_dotenv
+from storage import upload_photo, delete_photo
 load_dotenv()
 
-#communicating with supabase
-try:
-    conn = psycopg2.connect("postgresql://postgres.odhdzxlziobukaafpznn:databsepostgres@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres")
-    print("Connected successfully!")
-    conn.close()
-except Exception as e:
-    print("Connection failed:", e)
-
-PHOTO_FOLDER= "photos"
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 app = Flask(__name__)
 CORS(app)
-
-@app.route('/photos/<filename>')
-def get_photo(filename):
-    return send_from_directory(PHOTO_FOLDER, filename)
 
 @app.route("/api/ai", methods=["POST"])
 @app.route("/api/ai", methods=["POST"])
@@ -63,18 +50,7 @@ def get_students():
     conn = get_connection()
     students = conn.execute("SELECT * FROM students").fetchall()
     conn.close()
-
-    result = []
-    for s in students:
-        d = dict(s)
-        if d.get('photo_path'):
-            filename = os.path.basename(d['photo_path'])  # extracts just "7.jpg" from "photos/7.jpg"
-            d['photo_url'] = f"/photos/{filename}"
-        else:
-            d['photo_url'] = None
-        result.append(d)
-
-    return jsonify(result)
+    return jsonify(add_photo_urls(students))
 
 @app.route('/api/search_by_photo', methods=['POST'])
 def search_by_photo():
@@ -155,13 +131,11 @@ def add_student():
     photo_path_value = None
 
     if photo:
-        photo_path = os.path.join(PHOTO_FOLDER, f"{rollno}.jpg")
-        photo.save(photo_path)
+        file_bytes = photo.read()
 
-        image = face_recognition.load_image_file(photo_path)
+        image = face_recognition.load_image_file(io.BytesIO(file_bytes))
         encodings = face_recognition.face_encodings(image)
         if len(encodings) == 0:
-            os.remove(photo_path)
             return jsonify({"error": "No face detected in photo"})
 
         new_encoding = encodings[0]
@@ -177,18 +151,18 @@ def add_student():
             known_encoding = json.loads(student['face_encoding'])
             match = face_recognition.compare_faces([known_encoding], new_encoding, tolerance=0.5)
             if match[0]:
-                os.remove(photo_path)
                 return jsonify({
                     "error": f"Person already exists in the database as {student['name']} (Roll {student['rollno']})"
                 })
         # --- end duplicate check ---
 
         encoding_str = json.dumps(new_encoding.tolist())
-        photo_path_value = photo_path
+        # Upload to Supabase Storage only after passing face + duplicate checks
+        photo_path_value = upload_photo(f"{rollno}.jpg", file_bytes, photo.mimetype or "image/jpeg")
 
     conn = get_connection()
     conn.execute(
-        "INSERT INTO students (rollno, name, grade, marks, face_encoding, photo_path) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO students (rollno, name, grade, marks, face_encoding, photo_path) VALUES (%s, %s, %s, %s, %s, %s)",
         (rollno, name, grade, marks, encoding_str, photo_path_value)
     )
     conn.commit()
@@ -202,33 +176,33 @@ def update_photo(rollno):
         return jsonify({"error": "No photo uploaded"}), 400
 
     conn = get_connection()
-    student = conn.execute("SELECT * FROM students WHERE rollno = ?", (rollno,)).fetchone()
+    student = conn.execute("SELECT * FROM students WHERE rollno = %s", (rollno,)).fetchone()
 
     if not student:
         conn.close()
         return jsonify({"error": "Student not found"}), 404
 
-    # --- delete the old photo file first (Task 3) ---
-    old_path = student['photo_path']
-    if old_path and os.path.exists(old_path):
-        os.remove(old_path)
-    # --- end delete old photo ---
+    old_url = student['photo_path']
 
-    new_path = os.path.join(PHOTO_FOLDER, f"{rollno}.jpg")
-    photo.save(new_path)
-
-    image = face_recognition.load_image_file(new_path)
+    file_bytes = photo.read()
+    image = face_recognition.load_image_file(io.BytesIO(file_bytes))
     encodings = face_recognition.face_encodings(image)
     if len(encodings) == 0:
-        os.remove(new_path)
         conn.close()
         return jsonify({"error": "No face detected in photo"}), 400
 
     encoding_str = json.dumps(encodings[0].tolist())
 
+    # Upload new photo (overwrites <rollno>.jpg in the bucket)
+    new_url = upload_photo(f"{rollno}.jpg", file_bytes, photo.mimetype or "image/jpeg")
+
+    # Remove the old object if it lived under a different key (best-effort)
+    if old_url and old_url != new_url:
+        delete_photo(old_url)
+
     conn.execute(
-        "UPDATE students SET face_encoding = ?, photo_path = ? WHERE rollno = ?",
-        (encoding_str, new_path, rollno)
+        "UPDATE students SET face_encoding = %s, photo_path = %s WHERE rollno = %s",
+        (encoding_str, new_url, rollno)
     )
     conn.commit()
     conn.close()
@@ -236,14 +210,12 @@ def update_photo(rollno):
     return jsonify({"message": "Photo updated"})
 
 def add_photo_urls(students):
+    # photo_path now holds the full Supabase Storage public URL, so photo_url is
+    # simply that value (single source of truth — no filename guessing).
     result = []
     for s in students:
         d = dict(s)
-        if d.get('photo_path') and os.path.exists(d['photo_path']):
-            filename = os.path.basename(d['photo_path'])
-            d['photo_url'] = f"/photos/{filename}"
-        else:
-            d['photo_url'] = None
+        d['photo_url'] = d.get('photo_path') or None
         result.append(d)
     return result
 
@@ -252,7 +224,7 @@ def search_students():
     name = request.args.get("name", "")
     conn = get_connection()
     students = conn.execute(
-        "SELECT * FROM students WHERE name LIKE ?", (f"%{name}%",)
+        "SELECT * FROM students WHERE name LIKE %s", (f"%{name}%",)
     ).fetchall()
     conn.close()
     return jsonify(add_photo_urls(students))
@@ -271,9 +243,9 @@ def get_topper():
 @app.route("/api/students/above-avg", methods=["GET"])
 def get_above_avg():
     conn = get_connection()
-    avg = conn.execute("SELECT AVG(marks) FROM students").fetchone()[0]
+    avg = conn.execute("SELECT AVG(marks) AS avg FROM students").fetchone()['avg']
     students = conn.execute(
-        "SELECT * FROM students WHERE marks > ?", (avg,)
+        "SELECT * FROM students WHERE marks > %s", (avg,)
     ).fetchall()
     conn.close()
     return jsonify(add_photo_urls(students))
@@ -281,9 +253,9 @@ def get_above_avg():
 @app.route("/api/students/below-avg", methods=["GET"])
 def get_below_avg():
     conn = get_connection()
-    avg = conn.execute("SELECT AVG(marks) FROM students").fetchone()[0]
+    avg = conn.execute("SELECT AVG(marks) AS avg FROM students").fetchone()['avg']
     students = conn.execute(
-        "SELECT * FROM students WHERE marks < ?", (avg,)
+        "SELECT * FROM students WHERE marks < %s", (avg,)
     ).fetchall()
     conn.close()
     return jsonify(add_photo_urls(students))
@@ -291,7 +263,7 @@ def get_below_avg():
 @app.route("/api/students/<int:rollno>", methods=["DELETE"])
 def delete_student(rollno):
     conn = get_connection()
-    conn.execute("DELETE FROM students WHERE rollno = ?", (rollno,))
+    conn.execute("DELETE FROM students WHERE rollno = %s", (rollno,))
     conn.commit()
     conn.close()
     return jsonify({"message": "Deleted"})

@@ -1,4 +1,7 @@
 .env
+.deploy_secrets.env
+deployment_handoff_brief.md
+DEPLOY_RUNBOOK.md
 __pycache__/
 *.pyc
 face_env/

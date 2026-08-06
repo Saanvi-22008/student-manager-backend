@@ -7,9 +7,36 @@ from dotenv import load_dotenv
 load_dotenv()
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+class _DictConnection:
+    """Adapter that lets the existing SQLite-style route code keep working on
+    psycopg2/Postgres: exposes conn.execute(...) returning a RealDictCursor
+    (so .fetchall()/.fetchone() and dict-style row access still work), and
+    passes cursor/commit/rollback/close through to the real connection."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params)
+        return cur
+
+    def cursor(self, *args, **kwargs):
+        return self._conn.cursor(*args, **kwargs)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+
 def get_connection():
     conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    return _DictConnection(conn)
 
 def init_db():
     conn = get_connection()
