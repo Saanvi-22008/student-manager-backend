@@ -22,7 +22,7 @@ def ask_ai():
     question = data["prompt"]
 
     conn = get_connection()
-    students = conn.execute("SELECT * FROM students").fetchall()
+    students = conn.execute("SELECT * FROM students ORDER BY rollno").fetchall()
     conn.close()
 
     # Strip out face_encoding — irrelevant and confusing for text questions
@@ -48,7 +48,7 @@ def ask_ai():
 @app.route("/api/students", methods=["GET"])
 def get_students():
     conn = get_connection()
-    students = conn.execute("SELECT * FROM students").fetchall()
+    students = conn.execute("SELECT * FROM students ORDER BY rollno").fetchall()
     conn.close()
     return jsonify(add_photo_urls(students))
 
@@ -97,7 +97,7 @@ def search_by_photo():
 
     # question-answer section
     conn = get_connection()
-    all_students = conn.execute("SELECT * FROM students").fetchall()
+    all_students = conn.execute("SELECT * FROM students ORDER BY rollno").fetchall()
     conn.close()
     students_list = [
         {k: v for k, v in dict(s).items() if k != "face_encoding"}
@@ -224,7 +224,7 @@ def search_students():
     name = request.args.get("name", "")
     conn = get_connection()
     students = conn.execute(
-        "SELECT * FROM students WHERE name LIKE %s", (f"%{name}%",)
+        "SELECT * FROM students WHERE name LIKE %s ORDER BY rollno", (f"%{name}%",)
     ).fetchall()
     conn.close()
     return jsonify(add_photo_urls(students))
@@ -245,7 +245,7 @@ def get_above_avg():
     conn = get_connection()
     avg = conn.execute("SELECT AVG(marks) AS avg FROM students").fetchone()['avg']
     students = conn.execute(
-        "SELECT * FROM students WHERE marks > %s", (avg,)
+        "SELECT * FROM students WHERE marks > %s ORDER BY rollno", (avg,)
     ).fetchall()
     conn.close()
     return jsonify(add_photo_urls(students))
@@ -255,7 +255,7 @@ def get_below_avg():
     conn = get_connection()
     avg = conn.execute("SELECT AVG(marks) AS avg FROM students").fetchone()['avg']
     students = conn.execute(
-        "SELECT * FROM students WHERE marks < %s", (avg,)
+        "SELECT * FROM students WHERE marks < %s ORDER BY rollno", (avg,)
     ).fetchall()
     conn.close()
     return jsonify(add_photo_urls(students))
